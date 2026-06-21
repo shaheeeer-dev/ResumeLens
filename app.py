@@ -132,7 +132,7 @@ st.markdown("""
 # Header
 # ─────────────────────────────────────────────
 
-st.markdown("## 📄 ResumeLens")
+st.markdown("## 📄 AI Resume Analyser")
 st.markdown("Upload your resume. Get your ATS score, improvement suggestions, matching jobs, and a skill gap report.")
 st.markdown("---")
 
