@@ -155,7 +155,7 @@ with col_role:
     job_location = st.text_input(
         "Job Location (for Indeed)",
         value="remote",
-        placeholder="e.g. remote, New York, London"
+        placeholder="e.g. remote, Lahore, London"
     )
 
 analyze_btn = st.button("🔍 Analyze Resume", type="primary", use_container_width=True)
@@ -185,7 +185,7 @@ if analyze_btn:
         sections = parse_sections(raw_text)
         skills_list = extract_skills_list(sections.get("skills", ""))
         ats_result = score_resume(sections, raw_text)
-        suggestions = generate_suggestions(ats_result)
+        suggestions = generate_suggestions(ats_result, raw_text)
         skill_gap = analyze_skill_gap(skills_list, target_role)
 
     with st.spinner("Fetching matching jobs (this may take 10–15 seconds)..."):

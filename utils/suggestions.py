@@ -1,161 +1,116 @@
 """
-utils/suggestions.py
-Generates per-section improvement suggestions based on ATS scoring results.
+utils/suggestions.py — AI‑powered improvement suggestions via Groq
 """
+import json
+import streamlit as st
+from groq import Groq
 
-# Rewrite examples per section showing weak → strong
-REWRITE_EXAMPLES = {
-    "experience": {
-        "weak":   "Worked on backend tasks and helped with the team.",
-        "strong": "Led backend development of a REST API serving 10K+ daily users, reducing response time by 35% using caching.",
-    },
-    "projects": {
-        "weak":   "Made a vehicle detection project using Python.",
-        "strong": "Built a real-time Vehicle Monitoring System using Python, OpenCV, and YOLOv8, achieving 92% detection accuracy on a 5K-image dataset.",
-    },
-    "skills": {
-        "weak":   "Python, SQL, some web stuff.",
-        "strong": "Python · FastAPI · Django · PostgreSQL · Redis · Docker · Git · REST APIs · Linux",
-    },
-    "summary": {
-        "weak":   "I am a computer science student looking for opportunities.",
-        "strong": "Final-year CS student with hands-on experience in backend development (Django, FastAPI) and ML (PyTorch, scikit-learn), seeking a software engineering internship.",
-    },
-}
-
-# Advice rules: maps (section, issue_keyword) → suggestion text
-ADVICE_RULES = {
-    "experience": [
-        {
-            "trigger": "metrics",
-            "advice": "Add numbers wherever possible — users served, performance gains, team size, time saved.",
-        },
-        {
-            "trigger": "brief",
-            "advice": "Each role should have 3–5 bullet points. Use the format: Action Verb + What You Did + Result.",
-        },
-        {
-            "trigger": "keyword",
-            "advice": "Include keywords from job descriptions: 'designed', 'implemented', 'optimized', 'deployed'.",
-        },
-    ],
-    "projects": [
-        {
-            "trigger": "technologies",
-            "advice": "Always list the specific tech stack used — language, frameworks, tools, and any APIs.",
-        },
-        {
-            "trigger": "impact",
-            "advice": "Quantify the project: dataset size, accuracy achieved, number of users, deployment status (live link or GitHub).",
-        },
-        {
-            "trigger": "brief",
-            "advice": "Each project should have a 2–3 line description: what it does, how it was built, and what it achieved.",
-        },
-    ],
-    "skills": [
-        {
-            "trigger": "brief",
-            "advice": "List at least 12–15 skills. Group them: Languages · Frameworks · Databases · Tools · Platforms.",
-        },
-    ],
-    "contact": [
-        {
-            "trigger": "linkedin",
-            "advice": "Add your LinkedIn URL — many ATS systems and recruiters check this directly.",
-        },
-        {
-            "trigger": "github",
-            "advice": "Add your GitHub profile — essential for technical roles to showcase your work.",
-        },
-        {
-            "trigger": "email",
-            "advice": "Your resume must have a professional email address.",
-        },
-        {
-            "trigger": "phone",
-            "advice": "Include a phone number with country code for international roles.",
-        },
-    ],
-    "education": [
-        {
-            "trigger": "brief",
-            "advice": "Include: degree name, institution, graduation year, and GPA (if 3.0+). Add relevant coursework if experience is limited.",
-        },
-    ],
-    "certifications": [
-        {
-            "trigger": "missing",
-            "advice": "Even one certification (Google, AWS, Coursera) significantly boosts ATS scores for technical roles.",
-        },
-    ],
-    "summary": [
-        {
-            "trigger": "missing",
-            "advice": "Add a 2–3 sentence summary at the top: who you are, your top skills, and what you're looking for.",
-        },
-        {
-            "trigger": "brief",
-            "advice": "Make your summary role-specific. Tailor it to the job you're applying for.",
-        },
-    ],
-}
-
-# General tips shown regardless of section scores
-GENERAL_TIPS = [
-    "Use a single-column layout — multi-column resumes often confuse ATS parsers.",
-    "Avoid tables, text boxes, headers/footers — they get dropped by most ATS systems.",
-    "File name matters: use 'FirstName_LastName_Resume.pdf', not 'CV_final_v3.pdf'.",
-    "Keep your resume to 1 page if you have under 3 years of experience.",
-    "Use standard section headings (Education, Experience) — creative names like 'My Journey' confuse ATS.",
-]
+# ----------------------------------------------------------------------
+# 1. Groq client (reads key from Streamlit secrets)
+# ----------------------------------------------------------------------
+@st.cache_resource
+def get_groq_client():
+    return Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 
-def generate_suggestions(ats_result: dict) -> dict:
+# ----------------------------------------------------------------------
+# 2. Core AI function
+# ----------------------------------------------------------------------
+def _ai_suggestions(ats_result: dict, raw_text: str) -> dict:
     """
-    Given ATS scoring result, produce suggestions per section.
-    Returns: { section: { advice: [str], rewrite_example: dict|None } }
+    Sends the resume text + ATS findings to Groq and returns a
+    structured JSON with per‑section advice, rewrite examples,
+    weak buzzwords, and repeated phrases.
     """
-    suggestions = {}
-    section_scores = ats_result.get("section_scores", {})
+    # Build a summary of ATS findings for the model
+    section_findings = []
+    for section, data in ats_result.get("section_scores", {}).items():
+        issues = data.get("issues", [])
+        passed = data.get("passed_checks", [])
+        score = data["score"]
+        findings = f"{section}: score={score}%"
+        if issues:
+            findings += f", issues: {'; '.join(issues)}"
+        if passed:
+            findings += f", passed: {'; '.join(passed)}"
+        section_findings.append(findings)
 
-    for section, score_data in section_scores.items():
-        section_advice = []
-        rewrite = None
+    ats_summary = "\n".join(section_findings)
 
-        issues = score_data.get("issues", [])
-        score = score_data.get("score", 100)
-        present = score_data.get("present", True)
+    prompt = f"""
+You are an expert resume coach and ATS analyst. Below is a resume and a list of automated ATS findings.
 
-        # Only suggest for sections that need improvement
-        if score >= 90 and present:
-            suggestions[section] = {"advice": [], "rewrite_example": None}
-            continue
+Your job is to return a JSON object with exactly these keys:
 
-        rules = ADVICE_RULES.get(section, [])
+- "section_suggestions": an object where each key is a section name (e.g., "experience", "projects", "skills", "summary", "education", "contact", "certifications") and the value is an object with:
+    - "advice": an array of 1‑3 actionable, specific suggestions for that section. Use the ATS issues to guide you, but also notice other weaknesses.
+    - "rewrite_example": either null or an object with "weak" and "strong" strings. If the section contains bullet points, pick the weakest one and rewrite it with more impact, action verbs, and quantified results. If there's no text to rewrite, set to null.
 
-        # Match rules against detected issues
-        for rule in rules:
-            trigger = rule["trigger"]
-            # Check if any issue string mentions the trigger keyword
-            if not present or any(trigger in issue.lower() for issue in issues):
-                section_advice.append(rule["advice"])
+- "general_tips": an array of 3‑5 general ATS tips that apply to this resume (not generic copy‑paste, but derived from the actual content).
 
-        # If section is missing entirely, add all rules for it
-        if not present and not section_advice:
-            for rule in rules:
-                section_advice.append(rule["advice"])
+- "weak_buzzwords": an array of strings that were overused or vague (e.g., "helped", "worked on", "assisted with", "responsible for", "various", "tasks"). Include a short explanation for each.
 
-        # Add rewrite example if section score is below 70
-        if score < 70 and section in REWRITE_EXAMPLES:
-            rewrite = REWRITE_EXAMPLES[section]
+- "repeated_phrases": an array of phrases that appear more than twice in the resume, each with a note on where they appear and why that hurts.
 
-        suggestions[section] = {
-            "advice": section_advice,
-            "rewrite_example": rewrite,
+Important:
+- Be brutally honest but constructive.
+- For rewrite_example, make sure the "strong" version is realistic and keeps the same factual core.
+- Return only the JSON object, no other text.
+
+ATS Findings:
+{ats_summary}
+
+Resume Text:
+---
+{raw_text[:6000]}   # trim to avoid token limits
+---
+"""
+    client = get_groq_client()
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            response_format={"type": "json_object"},
+            max_tokens=2500,
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        st.error(f"AI suggestion engine failed: {e}")
+        # fallback to empty structure
+        return {
+            "section_suggestions": {},
+            "general_tips": [],
+            "weak_buzzwords": [],
+            "repeated_phrases": [],
         }
 
+
+# ----------------------------------------------------------------------
+# 3. Public function – same signature as before, but accepts raw_text
+# ----------------------------------------------------------------------
+def generate_suggestions(ats_result: dict, raw_text: str = "") -> dict:
+    """
+    Returns a dict with:
+      - section_suggestions  (as before)
+      - general_tips         (as before)
+      - weak_buzzwords       (NEW)
+      - repeated_phrases     (NEW)
+    """
+    if not raw_text.strip():
+        # fallback: return empty if no text provided
+        return {
+            "section_suggestions": {},
+            "general_tips": [],
+            "weak_buzzwords": [],
+            "repeated_phrases": [],
+        }
+
+    ai_output = _ai_suggestions(ats_result, raw_text)
+
     return {
-        "section_suggestions": suggestions,
-        "general_tips": GENERAL_TIPS,
+        "section_suggestions": ai_output.get("section_suggestions", {}),
+        "general_tips": ai_output.get("general_tips", []),
+        "weak_buzzwords": ai_output.get("weak_buzzwords", []),
+        "repeated_phrases": ai_output.get("repeated_phrases", []),
     }
